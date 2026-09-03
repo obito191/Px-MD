@@ -45,7 +45,7 @@ async function startObito() {
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
-                const phoneNumber = "9674609057"; 
+                const phoneNumber = "919674609057"; 
                 const code = await sock.requestPairingCode(phoneNumber);
                 console.log(`\n\n=== YOUR PAIRING CODE IS: ${code} ===\n\n`);
             } catch (err) {
