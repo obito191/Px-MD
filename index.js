@@ -13,7 +13,11 @@ const botName = 'ＯＢＩＴＯ - Ｖ１';
 const dbPath = path.resolve(__dirname, 'database.json');
 let db = { sudo: [], groups: {} };
 if (fs.existsSync(dbPath)) {
-    db = JSON.parse(fs.readFileSync(dbPath, 'utf-8'));
+    try {
+        db = JSON.parse(fs.readFileSync(dbPath, 'utf-8'));
+    } catch (e) {
+        db = { sudo: [], groups: {} };
+    }
 }
 const saveDB = () => fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
 
@@ -42,7 +46,6 @@ async function startObito() {
         }
     });
 
-    // Auto Pairing Code Generator
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
@@ -50,18 +53,18 @@ async function startObito() {
                 const code = await sock.requestPairingCode(phoneNumber);
                 console.log(`\n\n=== YOUR PAIRING CODE IS: ${code} ===\n\n`);
             } catch (err) {
-                console.log("[ SYSTEM ] Pairing code generation failed, retrying...", err);
+                console.log("[ SYSTEM ] Pairing code generation failed...", err);
             }
         }, 8000);
     }
 
-    // --- GROUP PARTICIPANTS (PDX & ANTIDEMOTE) ---
     sock.ev.on('group-participants.update', async (update) => {
         const { id, participants, action, author } = update;
         if (!db.groups[id]) return;
         
         const groupDb = db.groups[id];
         const botJid = sock.user?.id ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : '';
+        const cleanAuthor = author ? author.split(':')[0] + '@s.whatsapp.net' : '';
 
         if (groupDb.pdx && action === 'promote') {
             const msg = `*［ ⚡ ＳＹＳＴＥＭ ＵＰＤＡＴＥ ］*\n\n⟁ *Status:* New Admin Promoted\n⟁ *Target:* @${participants[0].split('@')[0]}`;
@@ -70,60 +73,67 @@ async function startObito() {
         }
 
         if (groupDb.antidemote && action === 'demote') {
-            if (author && author !== botJid && !ownerNumbers.includes(author)) {
+            if (cleanAuthor && cleanAuthor !== botJid && !ownerNumbers.includes(cleanAuthor)) {
                 try {
                     await sock.groupParticipantsUpdate(id, [author], 'demote');
                     await sock.groupParticipantsUpdate(id, participants, 'promote');
-                    const alertMsg = `*［ ☢️ ＡＮＴＩ-ＤＥＭＯＴＥ ］*\n\n☠️ *Target:* @${author.split('@')[0]}\n⚠️ *Crime:* Unauthorized Admin Demotion.\n⚡ *Penalty:* Privileges Revoked.`;
-                    await sock.sendMessage(id, { text: alertMsg, mentions: [author, ...participants] });
+                    const alertMsg = `*［ ☢️ ＡＮＴＩ-ＤＥＭＯＴＥ ］*\n\n☠️ *Target:* @${cleanAuthor.split('@')[0]}\n⚠️ *Crime:* Unauthorized Admin Demotion.\n⚡ *Penalty:* Privileges Revoked.`;
+                    await sock.sendMessage(id, { text: alertMsg, mentions: [cleanAuthor, ...participants] });
                 } catch(e){}
             }
         }
     });
 
-    // --- MESSAGE UPSERT (ALL FEATURES & COMMANDS) ---
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
         if (!msg.message) return;
 
-        // Fix for Disappearing Messages
         let actualMessage = msg.message;
-        if (actualMessage.ephemeralMessage) {
+        if (actualMessage?.ephemeralMessage) {
             actualMessage = actualMessage.ephemeralMessage.message;
-        } else if (actualMessage.viewOnceMessage) {
+        } else if (actualMessage?.viewOnceMessage?.message) {
             actualMessage = actualMessage.viewOnceMessage.message;
+        } else if (actualMessage?.documentWithCaptionMessage?.message) {
+            actualMessage = actualMessage.documentWithCaptionMessage.message;
         }
         
+        if (!actualMessage) return;
+
         const messageType = Object.keys(actualMessage)[0];
         const body = actualMessage.conversation || actualMessage.extendedTextMessage?.text || actualMessage.imageMessage?.caption || actualMessage.videoMessage?.caption || "";
 
         const from = msg.key.remoteJid;
         const botNumber = sock.user?.id ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : '';
-        const sender = msg.key.fromMe ? botNumber : (msg.key.participant || msg.key.remoteJid);
-        const isGroup = from.endsWith('@g.us');
         
+        // JID Fix: Cleaning the sender number properly
+        const rawSender = msg.key.fromMe ? botNumber : (msg.key.participant || msg.key.remoteJid);
+        const sender = rawSender ? rawSender.split(':')[0] + '@s.whatsapp.net' : '';
+        
+        const isGroup = from.endsWith('@g.us');
         const isOwner = ownerNumbers.includes(sender);
         const isSudo = isOwner || db.sudo.includes(sender);
         const isAllowedUser = isOwner || isSudo || sender === botNumber;
         
+        // Admin verification logic updated
         const isAdmin = isGroup ? await checkAdmin(sock, from, sender) : false;
         const isBotAdmin = isGroup ? await checkAdmin(sock, from, botNumber) : false;
 
-        // Auto-create Group DB
         if (isGroup && !db.groups[from]) {
             db.groups[from] = { antilink: false, spam: false, bug: false, pdx: false, status: false, antidemote: false, locked: [], badwords: [], warnings: {} };
             saveDB();
         }
         const groupDb = isGroup ? db.groups[from] : null;
 
-        // --- SECURITY PROTOCOLS (Anti-link, Spam, Bugs, Locks) ---
+        // --- SECURITY ACTION BLOCK ---
         if (isGroup && !isAdmin && !isOwner && isBotAdmin) {
             
+            // Antilink
             if (groupDb.antilink && /(https?:\/\/[^\s]+|www\.[^\s]+|[a-zA-Z0-9]+\.[a-zA-Z]{2,})/i.test(body)) {
                 groupDb.warnings[sender] = (groupDb.warnings[sender] || 0) + 1;
                 saveDB();
                 try { await sock.sendMessage(from, { delete: msg.key }); } catch(e){}
+                
                 if (groupDb.warnings[sender] >= 3) {
                     try {
                         await sock.sendMessage(from, { text: `*［ ☠️ ＳＥＣＵＲＩＴＹ ＢＲＥＡＣＨ ］*\n\nTarget: @${sender.split('@')[0]}\nAction: User Terminated 🚫`, mentions: [sender] });
@@ -135,11 +145,12 @@ async function startObito() {
                 }
             }
 
+            // Anti-Spam
             if (groupDb.spam) {
                 if (!spamCache[sender]) spamCache[sender] = [];
                 spamCache[sender].push(Date.now());
-                spamCache[sender] = spamCache[sender].filter(t => Date.now() - t < 4000);
-                if (spamCache[sender].length >= 6) {
+                spamCache[sender] = spamCache[sender].filter(t => Date.now() - t < 4000); 
+                if (spamCache[sender].length >= 5) { 
                     try {
                         await sock.sendMessage(from, { text: `*［ ☢️ ＳＰＡＭ ＤＥＴＥＣＴＥＤ ］*\n\nTarget: @${sender.split('@')[0]}\nAction: Extermination ⚡`, mentions: [sender] });
                         await sock.groupParticipantsUpdate(from, [sender], "remove");
@@ -148,40 +159,24 @@ async function startObito() {
                 }
             }
 
-            if (groupDb.locked && groupDb.locked.length > 0) {
-                if ((groupDb.locked.includes('photo') && messageType === 'imageMessage') ||
-                    (groupDb.locked.includes('video') && messageType === 'videoMessage') ||
-                    (groupDb.locked.includes('files') && messageType === 'documentMessage')) {
-                    try { await sock.sendMessage(from, { delete: msg.key }); } catch(e){}
-                }
-            }
-
+            // Anti-Bug
             if (groupDb.bug && (body.length > 15000 || /(?:[\u200e\u200f\u202a-\u202e\u2066-\u2069]{100,})/.test(body))) {
                 try {
                     await sock.sendMessage(from, { delete: msg.key });
                     await sock.groupParticipantsUpdate(from, [sender], "remove");
                 } catch(e){}
             }
-
-            if (groupDb.badwords && groupDb.badwords.some(word => body.toLowerCase().includes(word))) {
-                try { await sock.sendMessage(from, { delete: msg.key }); } catch(e){}
-            }
-
-            if (groupDb.status && actualMessage.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0 && body.toLowerCase().includes('story')) {
-                try { await sock.sendMessage(from, { delete: msg.key }); } catch(e){}
-            }
         }
 
         // --- COMMAND PROCESSING ---
         if (!body.startsWith(prefix)) return;
-        if (!isAllowedUser) return; // Only Owner/Sudo can use commands
+        if (!isAllowedUser) return; 
 
         const args = body.slice(prefix.length).trim().split(/ +/);
         const command = args.shift().toLowerCase();
 
-        // 1. Basic Commands
         if (command === 'ping') {
-            await sock.sendMessage(from, { text: '*［ 🟢 ＳＹＳＴＥＭ ＯＮＬＩＮＥ ］*\n\nBot is fully operational!' });
+            await sock.sendMessage(from, { text: '*［ 🟢 ＳＹＳＴＥＭ ＯＮＬＩＮＥ ］*\n\nEverything is working properly!' });
         }
 
         if (command === 'menu') {
@@ -212,13 +207,6 @@ async function startObito() {
 ├ ⟁ ${prefix}open
 ├ ⟁ ${prefix}warn @user
 ├ ⟁ ${prefix}word [add/remove]
-╰━━━━━━━━━━━━━━━┈
-
-╭━━━〔 👨‍💻 ᴏᴡɴᴇʀ 〕━━━┈
-├ ⟁ ${prefix}sudo @user
-├ ⟁ ${prefix}rm @user
-├ ⟁ ${prefix}gstory
-├ ⟁ ${prefix}broadcast
 ╰━━━━━━━━━━━━━━━┈`;
 
             try {
@@ -228,11 +216,10 @@ async function startObito() {
                     caption: menuText 
                 });
             } catch (err) {
-                await sock.sendMessage(from, { text: menuText });
+                await sock.sendMessage(from, { text: menuText }); 
             }
         }
 
-        // 2. Group Control Commands
         if (isGroup) {
             if (['antilink', 'spam', 'bug', 'pdx', 'status', 'antidemote'].includes(command)) {
                 const state = args[0] === 'on';
@@ -254,85 +241,16 @@ async function startObito() {
                     await sock.sendMessage(from, { text: "*［ 🔓 ＳＥＣＵＲＩＴＹ ］*\nGroup Unlocked." });
                 } catch (e) {}
             }
-            if (command === 'lock') {
-                if (!args[0]) {
-                    try { return await sock.sendMessage(from, { text: `*Locked Protocols:* ${groupDb.locked.join(', ') || 'None'}` }); } catch (e) { return; }
-                }
-                if (['photo', 'video', 'files'].includes(args[0]) && !groupDb.locked.includes(args[0])) {
-                    groupDb.locked.push(args[0]);
-                    saveDB();
-                    try { await sock.sendMessage(from, { text: `*［ 🔒 ＬＯＣＫＥＤ ］* ⟁ ${args[0]}` }); } catch (e) {}
-                }
-            }
-            if (command === 'unlock') {
-                if (groupDb.locked) {
-                    groupDb.locked = groupDb.locked.filter(item => item !== args[0]);
-                    saveDB();
-                    try { await sock.sendMessage(from, { text: `*［ 🔓 ＵＮＬＯＣＫＥＤ ］* ⟁ ${args[0]}` }); } catch (e) {}
-                }
-            }
-            if (command === 'warn') {
-                const target = args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : (actualMessage.extendedTextMessage?.contextInfo?.participant);
-                if (target) {
-                    try { await sock.sendMessage(from, { text: `*［ ⚠️ ＷＡＲＮＩＮＧ ＩＳＳＵＥＤ ］*\n\nTarget: @${target.split('@')[0]}`, mentions: [target] }); } catch (e) {}
-                }
-            }
-            if (command === 'word') {
-                const word = args.join(' ').toLowerCase();
-                if (!word) return;
-                if (groupDb.badwords.includes(word)) {
-                    groupDb.badwords = groupDb.badwords.filter(w => w !== word);
-                    try { await sock.sendMessage(from, { text: `*［ ✅ ＵＰＤＡＴＥＤ ］*\nRemoved '${word}' from Blacklist.` }); } catch (e) {}
-                } else {
-                    groupDb.badwords.push(word);
-                    try { await sock.sendMessage(from, { text: `*［ 🚫 ＢＬＡＣＫＬＩＳＴＥＤ ］*\nAdded '${word}' to system filter.` }); } catch (e) {}
-                }
-                saveDB();
-            }
-        }
-
-        // 3. Owner Only Commands
-        if (isOwner) {
-            if (command === 'sudo') {
-                const target = args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : (actualMessage.extendedTextMessage?.contextInfo?.participant);
-                if (target && !db.sudo.includes(target)) {
-                    db.sudo.push(target);
-                    saveDB();
-                    try { await sock.sendMessage(from, { text: `*［ 🛡️ ＡＣＣＥＳＳ ＧＲＡＮＴＥＤ ］*\n@${target.split('@')[0]} added to Sudo.`, mentions: [target] }); } catch (e) {}
-                }
-            }
-            if (command === 'rm') {
-                const target = args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : (actualMessage.extendedTextMessage?.contextInfo?.participant);
-                if (target) {
-                    db.sudo = db.sudo.filter(id => id !== target);
-                    saveDB();
-                    try { await sock.sendMessage(from, { text: `*［ ❌ ＡＣＣＥＳＳ ＲＥＶＯＫＥＤ ］*\n@${target.split('@')[0]} removed from Sudo.`, mentions: [target] }); } catch (e) {}
-                }
-            }
-            if (command === 'broadcast') {
-                const bMsg = args.join(' ');
-                try {
-                    const groups = Object.keys(await sock.groupFetchAllParticipating());
-                    for (let jid of groups) await sock.sendMessage(jid, { text: `*［ 📢 ＳＹＳＴＥＭ ＢＲＯＡＤＣＡＳＴ ］*\n\n${bMsg}` });
-                    await sock.sendMessage(from, { text: `*［ ✅ ＴＲＡＮＳＭＩＳＳＩＯＮ ＣＯＭＰＬＥＴＥ ］*` });
-                } catch (e) {}
-            }
-            if (command === 'gstory') {
-                try {
-                    const isQuoted = actualMessage.extendedTextMessage?.contextInfo?.quotedMessage;
-                    const messageToUpload = isQuoted ? isQuoted : actualMessage;
-                    await sock.sendMessage('status@broadcast', { forward: { key: { remoteJid: from, id: msg.key.id }, message: messageToUpload }});
-                    await sock.sendMessage(from, { text: `*［ ✅ ＳＴＡＴＵＳ ＵＰＤＡＴＥＤ ］*` });
-                } catch (e) {}
-            }
         }
     });
 }
 
+// --- JID Fix Applied Here ---
 async function checkAdmin(sock, groupId, userId) {
     try {
         const groupMetadata = await sock.groupMetadata(groupId);
-        const participant = groupMetadata.participants.find(p => p.id === userId);
+        const cleanUserId = userId.split(':')[0] + '@s.whatsapp.net';
+        const participant = groupMetadata.participants.find(p => (p.id.split(':')[0] + '@s.whatsapp.net') === cleanUserId);
         return participant?.admin === 'admin' || participant?.admin === 'superadmin';
     } catch (error) {
         return false;
