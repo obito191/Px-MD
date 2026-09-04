@@ -42,7 +42,7 @@ async function startObito() {
         }
     });
 
-    // Auto Pairing Code
+    // Auto Pairing Code Generator
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
@@ -55,7 +55,7 @@ async function startObito() {
         }, 8000);
     }
 
-    // --- GROUP PARTICIPANTS (এসিনক্রোনাস ফিক্স করা হয়েছে) ---
+    // --- GROUP PARTICIPANTS (PDX & ANTIDEMOTE) ---
     sock.ev.on('group-participants.update', async (update) => {
         const { id, participants, action, author } = update;
         if (!db.groups[id]) return;
@@ -65,28 +65,29 @@ async function startObito() {
 
         if (groupDb.pdx && action === 'promote') {
             const msg = `*［ ⚡ ＳＹＳＴＥＭ ＵＰＤＡＴＥ ］*\n\n⟁ *Status:* New Admin Promoted\n⟁ *Target:* @${participants[0].split('@')[0]}`;
-            await sock.sendMessage(ownerNumbers[0], { text: msg, mentions: participants });
-            if (botJid) await sock.sendMessage(botJid, { text: msg, mentions: participants });
+            try { await sock.sendMessage(ownerNumbers[0], { text: msg, mentions: participants }); } catch(e){}
+            if (botJid) { try { await sock.sendMessage(botJid, { text: msg, mentions: participants }); } catch(e){} }
         }
 
         if (groupDb.antidemote && action === 'demote') {
             if (author && author !== botJid && !ownerNumbers.includes(author)) {
-                await sock.groupParticipantsUpdate(id, [author], 'demote');
-                await sock.groupParticipantsUpdate(id, participants, 'promote');
-                
-                const alertMsg = `*［ ☢️ ＡＮＴＩ-ＤＥＭＯＴＥ ］*\n\n☠️ *Target:* @${author.split('@')[0]}\n⚠️ *Crime:* Unauthorized Admin Demotion.\n⚡ *Penalty:* Privileges Revoked.`;
-                await sock.sendMessage(id, { text: alertMsg, mentions: [author, ...participants] });
+                try {
+                    await sock.groupParticipantsUpdate(id, [author], 'demote');
+                    await sock.groupParticipantsUpdate(id, participants, 'promote');
+                    const alertMsg = `*［ ☢️ ＡＮＴＩ-ＤＥＭＯＴＥ ］*\n\n☠️ *Target:* @${author.split('@')[0]}\n⚠️ *Crime:* Unauthorized Admin Demotion.\n⚡ *Penalty:* Privileges Revoked.`;
+                    await sock.sendMessage(id, { text: alertMsg, mentions: [author, ...participants] });
+                } catch(e){}
             }
         }
     });
 
-    // --- MESSAGE UPSERT ---
+    // --- MESSAGE UPSERT (ALL FEATURES & COMMANDS) ---
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
         if (!msg.message) return;
 
-        // Disappearing Message Fix
+        // Fix for Disappearing Messages
         let actualMessage = msg.message;
         if (actualMessage.ephemeralMessage) {
             actualMessage = actualMessage.ephemeralMessage.message;
@@ -109,13 +110,16 @@ async function startObito() {
         const isAdmin = isGroup ? await checkAdmin(sock, from, sender) : false;
         const isBotAdmin = isGroup ? await checkAdmin(sock, from, botNumber) : false;
 
+        // Auto-create Group DB
         if (isGroup && !db.groups[from]) {
             db.groups[from] = { antilink: false, spam: false, bug: false, pdx: false, status: false, antidemote: false, locked: [], badwords: [], warnings: {} };
             saveDB();
         }
         const groupDb = isGroup ? db.groups[from] : null;
 
+        // --- SECURITY PROTOCOLS (Anti-link, Spam, Bugs, Locks) ---
         if (isGroup && !isAdmin && !isOwner && isBotAdmin) {
+            
             if (groupDb.antilink && /(https?:\/\/[^\s]+|www\.[^\s]+|[a-zA-Z0-9]+\.[a-zA-Z]{2,})/i.test(body)) {
                 groupDb.warnings[sender] = (groupDb.warnings[sender] || 0) + 1;
                 saveDB();
@@ -126,8 +130,11 @@ async function startObito() {
                         await sock.groupParticipantsUpdate(from, [sender], "remove");
                     } catch(e){}
                     groupDb.warnings[sender] = 0; 
+                } else {
+                    try { await sock.sendMessage(from, { text: `*［ ⚠️ ＳＹＳＴＥＭ ＡＬＥＲＴ ］*\n\nTarget: @${sender.split('@')[0]}\nWarning: Links prohibited. [ ${groupDb.warnings[sender]} / 3 ]`, mentions: [sender] }); } catch(e){}
                 }
             }
+
             if (groupDb.spam) {
                 if (!spamCache[sender]) spamCache[sender] = [];
                 spamCache[sender].push(Date.now());
@@ -140,14 +147,39 @@ async function startObito() {
                     spamCache[sender] = []; 
                 }
             }
+
+            if (groupDb.locked && groupDb.locked.length > 0) {
+                if ((groupDb.locked.includes('photo') && messageType === 'imageMessage') ||
+                    (groupDb.locked.includes('video') && messageType === 'videoMessage') ||
+                    (groupDb.locked.includes('files') && messageType === 'documentMessage')) {
+                    try { await sock.sendMessage(from, { delete: msg.key }); } catch(e){}
+                }
+            }
+
+            if (groupDb.bug && (body.length > 15000 || /(?:[\u200e\u200f\u202a-\u202e\u2066-\u2069]{100,})/.test(body))) {
+                try {
+                    await sock.sendMessage(from, { delete: msg.key });
+                    await sock.groupParticipantsUpdate(from, [sender], "remove");
+                } catch(e){}
+            }
+
+            if (groupDb.badwords && groupDb.badwords.some(word => body.toLowerCase().includes(word))) {
+                try { await sock.sendMessage(from, { delete: msg.key }); } catch(e){}
+            }
+
+            if (groupDb.status && actualMessage.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0 && body.toLowerCase().includes('story')) {
+                try { await sock.sendMessage(from, { delete: msg.key }); } catch(e){}
+            }
         }
 
+        // --- COMMAND PROCESSING ---
         if (!body.startsWith(prefix)) return;
-        if (!isAllowedUser) return;
+        if (!isAllowedUser) return; // Only Owner/Sudo can use commands
 
         const args = body.slice(prefix.length).trim().split(/ +/);
         const command = args.shift().toLowerCase();
 
+        // 1. Basic Commands
         if (command === 'ping') {
             await sock.sendMessage(from, { text: '*［ 🟢 ＳＹＳＴＥＭ ＯＮＬＩＮＥ ］*\n\nBot is fully operational!' });
         }
@@ -196,8 +228,102 @@ async function startObito() {
                     caption: menuText 
                 });
             } catch (err) {
-                console.log("Video fail, sending text fallback.");
                 await sock.sendMessage(from, { text: menuText });
+            }
+        }
+
+        // 2. Group Control Commands
+        if (isGroup) {
+            if (['antilink', 'spam', 'bug', 'pdx', 'status', 'antidemote'].includes(command)) {
+                const state = args[0] === 'on';
+                groupDb[command] = state;
+                saveDB();
+                try {
+                    await sock.sendMessage(from, { text: `*［ ⚙️ ＳＹＳＴＥＭ ＣＯＮＦＩＧ ］*\n\nProtocol: *${command.toUpperCase()}*\nStatus: *${state ? 'ONLINE 🟢' : 'OFFLINE 🔴'}*` });
+                } catch (e) {}
+            }
+            if (command === 'close') {
+                try {
+                    await sock.groupSettingUpdate(from, 'announcement');
+                    await sock.sendMessage(from, { text: "*［ 🔒 ＳＥＣＵＲＩＴＹ ］*\nGroup Locked by Admin." });
+                } catch (e) {}
+            }
+            if (command === 'open') {
+                try {
+                    await sock.groupSettingUpdate(from, 'not_announcement');
+                    await sock.sendMessage(from, { text: "*［ 🔓 ＳＥＣＵＲＩＴＹ ］*\nGroup Unlocked." });
+                } catch (e) {}
+            }
+            if (command === 'lock') {
+                if (!args[0]) {
+                    try { return await sock.sendMessage(from, { text: `*Locked Protocols:* ${groupDb.locked.join(', ') || 'None'}` }); } catch (e) { return; }
+                }
+                if (['photo', 'video', 'files'].includes(args[0]) && !groupDb.locked.includes(args[0])) {
+                    groupDb.locked.push(args[0]);
+                    saveDB();
+                    try { await sock.sendMessage(from, { text: `*［ 🔒 ＬＯＣＫＥＤ ］* ⟁ ${args[0]}` }); } catch (e) {}
+                }
+            }
+            if (command === 'unlock') {
+                if (groupDb.locked) {
+                    groupDb.locked = groupDb.locked.filter(item => item !== args[0]);
+                    saveDB();
+                    try { await sock.sendMessage(from, { text: `*［ 🔓 ＵＮＬＯＣＫＥＤ ］* ⟁ ${args[0]}` }); } catch (e) {}
+                }
+            }
+            if (command === 'warn') {
+                const target = args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : (actualMessage.extendedTextMessage?.contextInfo?.participant);
+                if (target) {
+                    try { await sock.sendMessage(from, { text: `*［ ⚠️ ＷＡＲＮＩＮＧ ＩＳＳＵＥＤ ］*\n\nTarget: @${target.split('@')[0]}`, mentions: [target] }); } catch (e) {}
+                }
+            }
+            if (command === 'word') {
+                const word = args.join(' ').toLowerCase();
+                if (!word) return;
+                if (groupDb.badwords.includes(word)) {
+                    groupDb.badwords = groupDb.badwords.filter(w => w !== word);
+                    try { await sock.sendMessage(from, { text: `*［ ✅ ＵＰＤＡＴＥＤ ］*\nRemoved '${word}' from Blacklist.` }); } catch (e) {}
+                } else {
+                    groupDb.badwords.push(word);
+                    try { await sock.sendMessage(from, { text: `*［ 🚫 ＢＬＡＣＫＬＩＳＴＥＤ ］*\nAdded '${word}' to system filter.` }); } catch (e) {}
+                }
+                saveDB();
+            }
+        }
+
+        // 3. Owner Only Commands
+        if (isOwner) {
+            if (command === 'sudo') {
+                const target = args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : (actualMessage.extendedTextMessage?.contextInfo?.participant);
+                if (target && !db.sudo.includes(target)) {
+                    db.sudo.push(target);
+                    saveDB();
+                    try { await sock.sendMessage(from, { text: `*［ 🛡️ ＡＣＣＥＳＳ ＧＲＡＮＴＥＤ ］*\n@${target.split('@')[0]} added to Sudo.`, mentions: [target] }); } catch (e) {}
+                }
+            }
+            if (command === 'rm') {
+                const target = args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : (actualMessage.extendedTextMessage?.contextInfo?.participant);
+                if (target) {
+                    db.sudo = db.sudo.filter(id => id !== target);
+                    saveDB();
+                    try { await sock.sendMessage(from, { text: `*［ ❌ ＡＣＣＥＳＳ ＲＥＶＯＫＥＤ ］*\n@${target.split('@')[0]} removed from Sudo.`, mentions: [target] }); } catch (e) {}
+                }
+            }
+            if (command === 'broadcast') {
+                const bMsg = args.join(' ');
+                try {
+                    const groups = Object.keys(await sock.groupFetchAllParticipating());
+                    for (let jid of groups) await sock.sendMessage(jid, { text: `*［ 📢 ＳＹＳＴＥＭ ＢＲＯＡＤＣＡＳＴ ］*\n\n${bMsg}` });
+                    await sock.sendMessage(from, { text: `*［ ✅ ＴＲＡＮＳＭＩＳＳＩＯＮ ＣＯＭＰＬＥＴＥ ］*` });
+                } catch (e) {}
+            }
+            if (command === 'gstory') {
+                try {
+                    const isQuoted = actualMessage.extendedTextMessage?.contextInfo?.quotedMessage;
+                    const messageToUpload = isQuoted ? isQuoted : actualMessage;
+                    await sock.sendMessage('status@broadcast', { forward: { key: { remoteJid: from, id: msg.key.id }, message: messageToUpload }});
+                    await sock.sendMessage(from, { text: `*［ ✅ ＳＴＡＴＵＳ ＵＰＤＡＴＥＤ ］*` });
+                } catch (e) {}
             }
         }
     });
