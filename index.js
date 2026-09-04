@@ -25,7 +25,7 @@ const spamCache = {};
 
 async function startObito() {
     // Railway Error Fix: Session folder name changed to 'obito_session'
-    const { state, saveCreds } = await useMultiFileAuthState('obito_session');
+    const { state, saveCreds } = await useMultiFileAuthState('obito_auth_new');
     
     const sock = makeWASocket({
         logger: pino({ level: 'silent' }),
